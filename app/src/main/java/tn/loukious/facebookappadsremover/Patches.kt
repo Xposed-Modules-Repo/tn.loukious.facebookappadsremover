@@ -3009,6 +3009,10 @@ private val reelsRenderHookedMethods: MutableSet<Method> =
 // Snapshots are cached by the host until invalidated, so memoize filtered
 // results by snapshot identity to keep the hot read path cheap. Shared across
 // the cached and DexKit installs.
+// The host creates fresh immutable snapshots while scrolling. Bound the
+// identity memo so old snapshots cannot grow the Facebook process forever;
+// identity lookup also avoids List.equals/hashCode walking every item.
+private const val REELS_SNAPSHOT_MEMO_LIMIT = 96
 private val reelsSnapshotMemo = Collections.synchronizedMap(IdentityHashMap<Any, Any>())
 
 // Hook targets recorded while the full DexKit pass installs, persisted for the
@@ -3713,17 +3717,19 @@ private fun hookReelsCollectionSnapshot(method: Method, classifier: ReelsAdClass
                     kept.add(item)
                 }
             }
-            if (removed == 0) {
-                reelsSnapshotMemo[snapshot] = snapshot
-                return
-            }
+            if (removed == 0) return
             val rebuilt = buildImmutableListLike(
                 snapshot,
                 kept,
                 method.declaringClass.classLoader
             )
             if (rebuilt != null) {
-                reelsSnapshotMemo[snapshot] = rebuilt
+                synchronized(reelsSnapshotMemo) {
+                    if (reelsSnapshotMemo.size >= REELS_SNAPSHOT_MEMO_LIMIT) {
+                        reelsSnapshotMemo.clear()
+                    }
+                    reelsSnapshotMemo[snapshot] = rebuilt
+                }
                 param.result = rebuilt
                 logHookHitThrottled(
                     "reelsCollectionFilter",
@@ -3984,6 +3990,7 @@ private fun hookReelsPagerListPush(method: Method, classifier: ReelsAdClassifier
     XposedBridge.hookMethod(method, object : XC_MethodHook() {
         override fun beforeHookedMethod(param: MethodHookParam) {
             val wrappers = param.args.getOrNull(0) as? Iterable<*> ?: return
+            val wrapperCount = (wrappers as? Collection<*>)?.size ?: wrappers.count()
             var total = 0
             var withModel = 0
             var removed = 0
@@ -4040,7 +4047,7 @@ private fun hookReelsPagerListPush(method: Method, classifier: ReelsAdClassifier
                     }
                 }
             }
-            if (keptWrappers.size != wrappers.count()) {
+            if (keptWrappers.size != wrapperCount) {
                 // Never null out the argument: the hooked method declares its
                 // parameter as a Kotlin non-null List, so a null (or a failed
                 // rebuild) must leave the original list untouched — the
@@ -4058,7 +4065,7 @@ private fun hookReelsPagerListPush(method: Method, classifier: ReelsAdClassifier
                 "reelsPagerPush",
                 method,
                 "items=$total withModel=$withModel adsRemoved=$removed writeFailures=$writeFailures " +
-                    "droppedWrappers=${wrappers.count() - keptWrappers.size} sample=[${sample.joinToString(", ")}]"
+                    "droppedWrappers=${wrapperCount - keptWrappers.size} sample=[${sample.joinToString(", ")}]"
             )
         }
     })
@@ -4098,6 +4105,12 @@ private class ReelsAdClassifier(
     private val modelInterfaces: List<Pair<Class<*>, Method>>,
     private val adValues: Set<Any>
 ) {
+    private companion object {
+        // Empty string is not a valid server classification. It lets the
+        // weak cache remember misses without storing null in a Java map.
+        private const val NO_CLASSIFICATION = ""
+    }
+
     lateinit var enumClassName: String
 
     val modelInterfaceClasses: List<Class<*>> get() = modelInterfaces.map { it.first }
@@ -4106,6 +4119,11 @@ private class ReelsAdClassifier(
     // zero-arg getters from item to model). Empty lists cache misses because
     // ConcurrentHashMap cannot store null values.
     private val accessorChainsCache = ConcurrentHashMap<Class<*>, List<List<Method>>>()
+    // The same model instances are passed through multiple pager/list hooks.
+    // Cache the resolved enum per live item so those hooks do not repeat the
+    // reflective getter chain on every snapshot.
+    private val itemClassificationCache = Collections.synchronizedMap(IdentityHashMap<Any, String>())
+    private val itemClassificationCacheLimit = 512
 
     fun isAdReelItem(item: Any?): Boolean {
         val classification = classificationOf(item) ?: return false
@@ -4128,7 +4146,11 @@ private class ReelsAdClassifier(
     // no model accessor chain resolves for the item's class.
     fun classificationOf(item: Any?): String? {
         if (item == null) return null
+        itemClassificationCache[item]?.let { cached ->
+            return cached.takeUnless { it == NO_CLASSIFICATION }
+        }
         val chains = resolveAccessorChains(item.javaClass) ?: return null
+        var resolved: String? = null
         for (chain in chains) {
             var current: Any? = item
             for (accessor in chain) {
@@ -4137,10 +4159,19 @@ private class ReelsAdClassifier(
             val model = current ?: continue
             for ((iface, method) in modelInterfaces) {
                 if (!iface.isInstance(model)) continue
-                return runCatching { method.invoke(model)?.toString() }.getOrNull()
+                resolved = runCatching { method.invoke(model)?.toString() }.getOrNull()
+                    ?: continue
+                break
             }
+            if (resolved != null) break
         }
-        return null
+        synchronized(itemClassificationCache) {
+            if (itemClassificationCache.size >= itemClassificationCacheLimit) {
+                itemClassificationCache.clear()
+            }
+            itemClassificationCache[item] = resolved ?: NO_CLASSIFICATION
+        }
+        return resolved
     }
 
     private fun resolveAccessorChains(clazz: Class<*>): List<List<Method>>? {
@@ -7419,7 +7450,11 @@ private fun hookGlobalGameAdSurfaceFallbacks() {
             XposedBridge.hookMethod(method, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val textView = param.thisObject as? TextView ?: return
-                    if (isExplicitFeedAdMarkerText(textView.text)) {
+                    // Use the argument supplied to setText; reading text back
+                    // can cross Facebook's custom TextView wrappers and adds
+                    // work on this very hot Android method.
+                    val text = param.args.getOrNull(0) as? CharSequence
+                    if (isExplicitFeedAdMarkerText(text)) {
                         hideLikelyAdContainer(textView, "explicit feed ad text")
                         return
                     }
@@ -7448,15 +7483,17 @@ private fun hookGlobalGameAdSurfaceFallbacks() {
             XposedBridge.hookMethod(method, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val view = param.thisObject as? View ?: return
-                    if (isExplicitFeedAdMarkerText(view.contentDescription)) {
+                    // The hook argument is the exact value being assigned and
+                    // avoids an extra getter on every accessibility update.
+                    val description = param.args.getOrNull(0) as? CharSequence
+                    if (isExplicitFeedAdMarkerText(description)) {
                         hideLikelyAdContainer(view, "explicit feed ad content description")
                         return
                     }
                     // Litho ComponentHost overrides getContentDescription and can
                     // return an aggregated/different value mid-mount, so match on
                     // the value actually being set.
-                    val descArg = param.args.getOrNull(0) as? CharSequence
-                    if (isReelsShoppingStickerMarkerText(descArg ?: view.contentDescription)) {
+                    if (isReelsShoppingStickerMarkerText(description ?: view.contentDescription)) {
                         hideReelsShoppingSticker(view, "reels shopping sticker content description")
                         return
                     }
@@ -7504,8 +7541,12 @@ private fun scheduleGameAdSurfaceSweep(view: View?, reason: String) {
 }
 
 private fun shouldScheduleFeedRowSweep(parent: ViewGroup?, child: View?): Boolean {
-    if (parent == null || child !is ViewGroup) return false
-    return parent.javaClass.name.contains("RecyclerView")
+    // Every RecyclerView row used to queue four recursive whole-subtree
+    // sweeps. During scrolling that became hundreds of main-thread walks.
+    // Explicit marker text/content-description hooks and structural feed
+    // guards already cover rows, while game/explicit marker views still use
+    // their dedicated sweep path above.
+    return false
 }
 
 private fun scheduleFeedRowSweep(view: View?, reason: String) {
@@ -8046,7 +8087,10 @@ private fun isFeedAdMarkerText(value: CharSequence?): Boolean {
 
 private fun isExplicitFeedAdMarkerText(value: CharSequence?): Boolean {
     if (value.isNullOrBlank()) return false
-    val normalized = value.toString().lowercase()
+    val raw = value.toString()
+    val first = raw.firstOrNull { !it.isWhitespace() } ?: return false
+    if (first != 'h' && first != 'H' && first != 'a' && first != 'A') return false
+    val normalized = raw.lowercase()
     return EXPLICIT_FEED_CARD_AD_MARKER_TOKENS.any { token -> normalized.contains(token) }
 }
 
@@ -8064,8 +8108,11 @@ private fun isFeedReelCtaAdMarkerText(value: CharSequence?): Boolean {
 
 private fun isReelsShoppingStickerMarkerText(value: CharSequence?): Boolean {
     if (value.isNullOrBlank()) return false
-    val normalized = value.toString().lowercase().trim()
-    if (!normalized.contains(" - ") || !normalized.contains(", ")) return false
+    val raw = value.toString().trim()
+    // Most content descriptions are ordinary accessibility labels. Only
+    // normalize strings with the composite creator/product shape we match.
+    if (!raw.contains(" - ") || !raw.contains(", ")) return false
+    val normalized = raw.lowercase()
     return REELS_SHOPPING_STICKER_CTA_TOKENS.any { token -> normalized.endsWith(token) }
 }
 

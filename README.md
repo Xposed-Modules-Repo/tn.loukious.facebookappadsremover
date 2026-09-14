@@ -66,6 +66,16 @@ Facebook 571 stores most application bytecode in 18 Superpack secondary dex file
 
 The preferred interception point is therefore after GraphQL data has been decoded but before dedicated ad providers merge it into the feed. Native or KernelSU hooks should only be considered if runtime logs show that the `ads_deletion` / `ads_insertion` provider hooks no longer resolve or fire.
 
+### Performance profile (v1.10)
+
+All ad/media hooks remain installed, but the framework fallback is bounded on
+the UI hot path. The global `addView` hook no longer queues recursive sweeps
+for every RecyclerView row during scrolling; targeted marker/game views still
+use their dedicated delayed sweep. Marker hooks inspect the setter argument
+directly, bounded Reels identity caches prevent repeated reflection and stale
+snapshot growth, and release builds keep diagnostic logging disabled. This
+avoids module-owned polling threads and unnecessary main-thread tree walks.
+
 ### Game Ads
 
 - Resolve Quicksilver ad request methods by their stable JSON error strings.
