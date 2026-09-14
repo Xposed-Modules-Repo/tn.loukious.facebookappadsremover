@@ -1,8 +1,8 @@
 # Facebook App Ads Remover
 
-An LSPosed/Xposed module for `com.facebook.katana` that removes ads using structural DexKit discovery plus guarded, version-specific fast paths.
+An LSPosed/Xposed module for `com.facebook.katana` that removes ads using structural DexKit discovery and guarded early-install caches.
 
-Current target: Facebook `576.0.0.42.73`, module `1.8`. Older versions (571 and below) are no longer supported.
+Current static verification: Facebook `577.0.0.50.72`, module `1.10` source. The resolver does not select hooks by Facebook's obfuscated class or method names. Exact host-version keys only invalidate cached targets after an update; DexKit re-discovers the new shapes automatically.
 
 ## Scope
 
@@ -24,6 +24,13 @@ Current target: Facebook `576.0.0.42.73`, module `1.8`. Older versions (571 and 
 
 ## Hook Strategy
 
+### Obfuscation and version changes
+
+- Stable strings are discovery seeds only. Every candidate is checked against its behavior: owner role, parameter/return shape, neighboring methods, implemented interfaces, and the data type it reads or writes.
+- Reels insertion is accepted only for a controller method carrying a candidate item and numeric position beside a numeric boolean gate. Sponsored-pool suppression is accepted only for the three-argument pool-add shape beside a boolean item classifier. RTI suppression is limited to Kotlin `Function0.invoke` request builders.
+- Shopping-card render hooks require a non-framework product model with a data-model field shape and suppress only when that payload is present on the instance. This prevents an optional empty field on a shared organic component from blanking the Reels surface.
+- Cached class names are scoped to both Facebook and module versions. A Facebook update discards stale names and performs structural discovery; no per-release obfuscated-name table is required.
+
 ### Feed / Stories / Reels
 
 - Resolve classes with DexKit using stable strings and method shapes.
@@ -36,7 +43,13 @@ Current target: Facebook `576.0.0.42.73`, module `1.8`. Older versions (571 and 
 - Block story ad providers by intercepting merge/fetch/update style methods.
 - Keep marker-based view removal as a last-resort safety net, not the primary News Feed path.
 
-#### Facebook 576 Findings
+#### Facebook 577 Findings
+
+- The installed APK analyzed on 2026-09-14 is `577.0.0.50.72` (`versionCode 474426253`). The existing Reels classification enum/interface shape remains present, as do the video-home insertion marker, sponsored-pool marker, and shoppable payload model.
+- The 577 Reels product payload resolves structurally to the model shared by the shoppable component anchors. Render suppression now checks that model field at runtime; an organic component instance with a null optional payload passes through.
+- The previous broad marker-only void hooks were narrowed because a changed build can reuse diagnostic strings in unrelated methods. The current source leaves those methods untouched unless their surrounding role matches the ad pipeline.
+
+#### Historical Facebook 576 findings
 
 - The feed component pair (576: wrapper `X.2q8`, component `X.2q4`) is discovered by Litho component name, not by obfuscated class name. Litho generated components pass a stable spec name to their base class constructor — `"NewsFeedFeedUnitComponent"` for the feed unit component and `"LoggingComponent"` for the generic wrapper Litho renders feed units through — and those strings survive Facebook's obfuscator. The class-load notifier reads the name reflectively (the generated base stores it in a final String field filled by a String constructor; the class is instantiated through its no-arg constructor to read it), and the full DexKit pass finds the same classes with an exact `usingStrings` match as a backstop.
 - The cached initial News Feed (including a sponsored slot) assembles and renders within ~2s of a cold start — before any DexKit scan can finish. To win that race, the discovered guard pair is persisted in the host's `cacheDir` keyed by the Facebook version, and later launches load it right after `Application.attach`. The cached class names still fail `Class.forName` at attach time (the secondary dex is not configured yet), so every timed guard attempt re-tries registering them; the guard then installs ~200ms after attach, before the cached feed renders. This is what removes the "second feed item is a sponsored post" on force-close/reopen. A Facebook update changes the version key and falls back to the DexKit discovery, which then rewrites the cache.

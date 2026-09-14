@@ -47,7 +47,7 @@ const val TAG = "FacebookAppAdsRemover"
 
 private const val HOST_PACKAGE = "com.facebook.katana"
 private const val BEFORE_SIZE_EXTRA = "facebook_ads_before_size"
-private const val BUILD_MARKER = "fb576_structural_component_guard_v1_2026_08_29"
+private const val BUILD_MARKER = "structural_component_guard_v2_2026_09_14"
 private const val ENABLE_UPSTREAM_REELS_AD_HOOKS = true
 private const val ENABLE_FEED_CSR_FILTER_HOOKS = true
 private const val ENABLE_LATE_FEED_LIST_HOOKS = true
@@ -2945,12 +2945,15 @@ private fun installReelsAdListFilters(classLoader: ClassLoader, bridge: DexKitBr
         }
     }.onFailure { Log.w(TAG, "Reels pager push resolution failed", it) }
 
-    // 2. Client-side ad insertion trigger ("maybeInsertAds"): void no-op.
-    hookVoidMethodsByString(classLoader, bridge, "VideoHomeDataControllerImpl.maybeInsertAds", "Reels client-side ad insertion disabled")
+    // 2. Client-side ad insertion trigger ("maybeInsertAds"): only no-op a
+    //    controller insertion method. The same diagnostic string can be
+    //    copied into unrelated telemetry helpers in later builds; a string
+    //    match alone is unsafe.
+    hookReelsMaybeInsertAds(classLoader, bridge)
 
-    // 3. FbShorts sponsored pool fill ("after_model_added_to_pool"): void
-    //    no-op, so vended ads never enter the pool.
-    hookVoidMethodsByString(classLoader, bridge, "after_model_added_to_pool", "Reels sponsored pool fill disabled")
+    // 3. FbShorts sponsored pool fill ("after_model_added_to_pool"): only
+    //    hook the three-argument pool add method with a boolean item classifier.
+    hookReelsSponsoredPoolAdd(classLoader, bridge)
 
     // 4. Async RTI ad fetches: block at the fetch builders.
     installReelsRtiAdBlock(classLoader, bridge)
@@ -3071,11 +3074,21 @@ private fun installReelsViewerAdRenderBlock(
             }.forEach { candidate ->
                 val clazz = runCatching { candidate.getInstance(classLoader) }.getOrNull() ?: return@forEach
                 shoppingAnchorClasses.add(clazz)
-                hookReelsShoppingRenderable(clazz, reelsRenderHookedMethods, "Reels shopping card blocked")
             }
         }.onFailure { Log.w(TAG, "Reels shopping card block failed for $anchor", it) }
     }
     val shoppingPayloadType = resolveShoppingPayloadType(shoppingAnchorClasses)
+    // Anchor strings identify the feature, but a class containing the string
+    // can be a factory or a parent component. Resolve the payload first and
+    // only block a render when that instance actually carries a product model.
+    shoppingAnchorClasses.distinctBy { it.name }.forEach { clazz ->
+        hookReelsShoppingRenderable(
+            clazz,
+            reelsRenderHookedMethods,
+            "Reels shopping card blocked",
+            shoppingPayloadType
+        )
+    }
     if (shoppingPayloadType != null) {
         runCatching {
             val matches = bridge.findClass {
@@ -3086,7 +3099,12 @@ private fun installReelsViewerAdRenderBlock(
             }
             for (candidate in matches) {
                 val clazz = runCatching { candidate.getInstance(classLoader) }.getOrNull() ?: continue
-                hookReelsShoppingRenderable(clazz, reelsRenderHookedMethods, "Reels shopping card blocked (structural)")
+                hookReelsShoppingRenderable(
+                    clazz,
+                    reelsRenderHookedMethods,
+                    "Reels shopping card blocked (structural)",
+                    shoppingPayloadType
+                )
             }
             Log.i(TAG, "Reels shopping renderables for ${shoppingPayloadType.name}: ${matches.size}")
         }.onFailure { Log.w(TAG, "Reels shopping structural pass failed", it) }
@@ -3195,43 +3213,79 @@ private fun hookReelsAdRenderable(
 // payload holder). Anchors may individually lack the field, so any class that
 // shares the majority type wins.
 private fun resolveShoppingPayloadType(anchorClasses: List<Class<*>>): Class<*>? {
-    val counts = HashMap<Class<*>, Int>()
-    for (clazz in anchorClasses) {
+    // Count distinct anchor classes, not fields. A generated component can
+    // carry the same value twice; that must not make an unrelated type win.
+    val ownersByType = LinkedHashMap<Class<*>, MutableSet<Class<*>>>()
+    anchorClasses.distinctBy { it.name }.forEach { clazz ->
         clazz.declaredFields
             .filter { !Modifier.isStatic(it.modifiers) }
             .forEach { field ->
-                counts.merge(field.type, 1, Int::plus)
+                if (isLikelyShoppingPayloadType(field.type)) {
+                    ownersByType.getOrPut(field.type) { LinkedHashSet() }.add(clazz)
+                }
             }
     }
-    return counts.entries
-        .filter { (type, count) ->
-            count >= 2 && !type.name.startsWith("java.") && !type.isPrimitive
-        }
-        .maxByOrNull { it.value }?.key
+    return ownersByType.entries
+        .filter { (_, owners) -> owners.size >= 2 }
+        .maxWithOrNull(
+            compareBy<Map.Entry<Class<*>, MutableSet<Class<*>>>> { it.value.size }
+                .thenBy { it.key.declaredFields.size }
+        )?.key
 }
 
-// Unconditional render block for the shoppable product cards. Same shape as
-// hookReelsAdRenderable, but without the classifier check — every render of
-// these components is a shopping card. Shares the hooked-methods set so the
-// cached early install and the full pass never double-hook.
+private fun isLikelyShoppingPayloadType(type: Class<*>): Boolean {
+    if (type.isPrimitive || type.isEnum || type.isInterface || type.isArray) return false
+    if (type.name.startsWith("java.") || type.name.startsWith("android.")) return false
+    val fields = type.declaredFields.filter { !Modifier.isStatic(it.modifiers) }
+    if (fields.size < 8) return false
+    val stringFields = fields.count { it.type == String::class.java }
+    val scalarFields = fields.count {
+        it.type.isPrimitive ||
+            Number::class.java.isAssignableFrom(it.type) ||
+            it.type == Boolean::class.java
+    }
+    return stringFields >= 2 && scalarFields >= 2
+}
+
+// Render block for shoppable product cards. The payload check keeps shared
+// generated components safe when their optional product field is null. Shares
+// the hooked-methods set so cached and full installs never double-hook.
 private fun hookReelsShoppingRenderable(
     clazz: Class<*>,
     hookedRenderMethods: MutableSet<Method>,
-    label: String
+    label: String,
+    payloadType: Class<*>? = null
 ) {
-    val render = clazz.declaredMethods.firstOrNull {
-        it.name == "render" && !Modifier.isStatic(it.modifiers)
+    val render = resolveLithoRenderMethod(clazz) ?: clazz.declaredMethods.firstOrNull {
+        it.name == "render" &&
+            !Modifier.isStatic(it.modifiers) &&
+            !it.isBridge &&
+            !it.isSynthetic &&
+            it.parameterCount == 1 &&
+            !it.returnType.isPrimitive &&
+            it.returnType != Void.TYPE
     } ?: return
+    val payloadFields = clazz.declaredFields.filter { field ->
+        !Modifier.isStatic(field.modifiers) &&
+            (payloadType?.let { field.type == it } ?: isLikelyShoppingPayloadType(field.type))
+    }.onEach { it.isAccessible = true }
+    if (payloadFields.isEmpty()) return
     if (!hookedRenderMethods.add(render)) return
     reelsShoppingRenderableNames.add(clazz.name)
     render.isAccessible = true
     XposedBridge.hookMethod(render, object : XC_MethodHook() {
         override fun beforeHookedMethod(param: MethodHookParam) {
+            val target = param.thisObject ?: return
+            // Product fields are optional on several shared generated
+            // components. Returning null while the field is empty blanks an
+            // organic Reels page, which was the intermittent black-screen
+            // failure. Suppress only a real product-card instance.
+            if (payloadFields.none { runCatching { it.get(target) }.getOrNull() != null }) return
             param.result = null
             logHookHitThrottled("reelsShoppingCardBlock", render, "")
         }
     })
-    Log.i(TAG, "$label: ${clazz.name}.render")
+    Log.i(TAG, "$label: ${clazz.name}.${render.name} payloadFields=${payloadFields.size}")
 }
 
 // Marketplace sponsored units (seller row + "Sponsored" label + video card) in
@@ -3788,7 +3842,7 @@ private fun installReelsRtiAdBlock(classLoader: ClassLoader, bridge: DexKitBridg
             }.forEach { methodData ->
                 val method = runCatching { methodData.getMethodInstance(classLoader) }.getOrNull()
                     ?: return@forEach
-                if (Modifier.isStatic(method.modifiers) || method.parameterCount != 0) return@forEach
+                if (!isReelsRtiFunctionMethod(method)) return@forEach
                 method.isAccessible = true
                 XposedBridge.hookMethod(method, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
@@ -3801,30 +3855,122 @@ private fun installReelsRtiAdBlock(classLoader: ClassLoader, bridge: DexKitBridg
     }
 }
 
-private fun hookVoidMethodsByString(
+private fun isReelsRtiFunctionMethod(method: Method): Boolean {
+    if (Modifier.isStatic(method.modifiers) || method.parameterCount != 0) return false
+    if (method.name != "invoke" || method.returnType == Void.TYPE) return false
+    // The RTI request builders are Kotlin Function0 lambdas. Restricting the
+    // hook to that immutable contract prevents a zero-argument helper that
+    // happens to carry the request marker from being replaced with null.
+    return implementsInterface(method.declaringClass, "kotlin.jvm.functions.Function0")
+}
+
+private fun implementsInterface(type: Class<*>, interfaceName: String): Boolean {
+    val pending = ArrayDeque<Class<*>>()
+    val seen = HashSet<Class<*>>()
+    pending.add(type)
+    while (pending.isNotEmpty()) {
+        val current = pending.removeFirst()
+        if (!seen.add(current)) continue
+        if (current.name == interfaceName) return true
+        current.interfaces.forEach { pending.addLast(it) }
+        current.superclass?.let { pending.addLast(it) }
+    }
+    return false
+}
+
+private fun hookReelsMaybeInsertAds(
     classLoader: ClassLoader,
-    bridge: DexKitBridge,
-    usingString: String,
-    label: String
+    bridge: DexKitBridge
 ) {
     runCatching {
         bridge.findMethod {
-            matcher {
-                usingStrings(usingString)
-            }
+            matcher { usingStrings("VideoHomeDataControllerImpl.maybeInsertAds") }
         }.forEach { methodData ->
             val method = runCatching { methodData.getMethodInstance(classLoader) }.getOrNull()
                 ?: return@forEach
-            if (Modifier.isStatic(method.modifiers) || method.returnType != Void.TYPE) return@forEach
+            if (!isReelsMaybeInsertAdsMethod(method)) return@forEach
             method.isAccessible = true
             XposedBridge.hookMethod(method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     param.result = null
                 }
             })
-            Log.i(TAG, "$label: ${method.declaringClass.name}.${method.name}")
+            Log.i(TAG, "Reels client-side ad insertion disabled: ${methodSignature(method)}")
         }
-    }.onFailure { Log.w(TAG, "$label resolution failed", it) }
+    }.onFailure { Log.w(TAG, "Reels client-side ad insertion resolution failed", it) }
+}
+
+private fun isReelsMaybeInsertAdsMethod(method: Method): Boolean {
+    if (Modifier.isStatic(method.modifiers) || method.returnType != Void.TYPE) return false
+    val params = method.parameterTypes
+    if (params.size !in 1..3) return false
+    val hasPosition = params.any { type ->
+        type == Int::class.javaPrimitiveType ||
+            type == Long::class.javaPrimitiveType ||
+            type == Integer::class.java ||
+            type == Long::class.java
+    }
+    val hasCandidate = params.any { type ->
+        !type.isPrimitive &&
+            type != String::class.java &&
+            !List::class.java.isAssignableFrom(type) &&
+            !Map::class.java.isAssignableFrom(type)
+    }
+    if (!hasPosition || !hasCandidate) return false
+    // The controller also exposes a numeric eligibility gate. Requiring this
+    // sibling shape keeps diagnostic helpers with the same marker untouched.
+    return method.declaringClass.declaredMethods.any { sibling ->
+        !Modifier.isStatic(sibling.modifiers) &&
+            sibling.returnType == Boolean::class.javaPrimitiveType &&
+            sibling.parameterCount == 1 &&
+            (sibling.parameterTypes[0] == Int::class.javaPrimitiveType ||
+                sibling.parameterTypes[0] == Integer::class.java)
+    }
+}
+
+private fun hookReelsSponsoredPoolAdd(
+    classLoader: ClassLoader,
+    bridge: DexKitBridge
+) {
+    runCatching {
+        bridge.findMethod {
+            matcher { usingStrings("after_model_added_to_pool") }
+        }.forEach { methodData ->
+            val method = runCatching { methodData.getMethodInstance(classLoader) }.getOrNull()
+                ?: return@forEach
+            if (!isReelsSponsoredPoolAddMethod(method)) return@forEach
+            method.isAccessible = true
+            XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    param.result = null
+                }
+            })
+            Log.i(TAG, "Reels sponsored pool fill disabled: ${methodSignature(method)}")
+        }
+    }.onFailure { Log.w(TAG, "Reels sponsored pool resolution failed", it) }
+}
+
+private fun isReelsSponsoredPoolAddMethod(method: Method): Boolean {
+    if (Modifier.isStatic(method.modifiers) || method.returnType != Void.TYPE) return false
+    val params = method.parameterTypes
+    if (params.size != 3) return false
+    val session = params[0]
+    if (session.name != "com.facebook.auth.usersession.FbUserSession" &&
+        session.simpleName != "FbUserSession") return false
+    val itemType = params[1]
+    if (!itemType.isInterface) return false
+    // WatchAdStoryPool and VideoHomeSponsoredPool both expose a one-argument
+    // boolean item classifier beside their add method. This is the stable pool
+    // role; the telemetry label is only a discovery seed.
+    return method.declaringClass.declaredMethods.any { sibling ->
+        !Modifier.isStatic(sibling.modifiers) &&
+            sibling.returnType == Boolean::class.javaPrimitiveType &&
+            sibling.parameterCount == 1 &&
+            (sibling.parameterTypes[0] == itemType ||
+                (sibling.parameterTypes[0].isInterface &&
+                    (sibling.parameterTypes[0].isAssignableFrom(itemType) ||
+                        itemType.isAssignableFrom(sibling.parameterTypes[0]))))
+    }
 }
 
 // Filters ad items out of the nested lists pushed into the reels pager. The
