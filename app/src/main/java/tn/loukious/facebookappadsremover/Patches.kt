@@ -4103,8 +4103,9 @@ private class ReelsAdClassifier(
     val modelInterfaceClasses: List<Class<*>> get() = modelInterfaces.map { it.first }
 
     // Item class -> candidate accessor chains (each chain is a sequence of
-    // zero-arg getters from item to model). Null entries are cached misses.
-    private val accessorChainsCache = ConcurrentHashMap<Class<*>, List<List<Method>>?>()
+    // zero-arg getters from item to model). Empty lists cache misses because
+    // ConcurrentHashMap cannot store null values.
+    private val accessorChainsCache = ConcurrentHashMap<Class<*>, List<List<Method>>>()
 
     fun isAdReelItem(item: Any?): Boolean {
         val classification = classificationOf(item) ?: return false
@@ -4143,10 +4144,10 @@ private class ReelsAdClassifier(
     }
 
     private fun resolveAccessorChains(clazz: Class<*>): List<List<Method>>? {
-        accessorChainsCache.get(clazz)?.let { return it }
-        val chains = runCatching { findAccessorChains(clazz) }.getOrNull()
+        accessorChainsCache[clazz]?.let { return it.ifEmpty { null } }
+        val chains = runCatching { findAccessorChains(clazz).orEmpty() }.getOrDefault(emptyList())
         accessorChainsCache[clazz] = chains
-        return chains
+        return chains.ifEmpty { null }
     }
 
     // Direct accessors first (item method returning a model interface), then
