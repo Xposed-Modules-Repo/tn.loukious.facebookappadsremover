@@ -8032,11 +8032,12 @@ private fun collectFeedReelCtaAdSignals(root: View): FeedReelCtaAdSignals {
 }
 
 private fun isPotentialNativeGameAdView(view: View?): Boolean {
-    val className = view?.javaClass?.name?.lowercase() ?: return false
-    return className == "com.facebook.ads.adview" ||
-        (className.endsWith(".adview") &&
-            (className.startsWith("com.facebook.ads.") || className.contains("audiencenetwork"))) ||
-        className.contains("adchoices")
+    val className = view?.javaClass?.name ?: return false
+    return className.equals("com.facebook.ads.adview", ignoreCase = true) ||
+        (className.endsWith(".adview", ignoreCase = true) &&
+            (className.startsWith("com.facebook.ads.", ignoreCase = true) ||
+                className.contains("audiencenetwork", ignoreCase = true))) ||
+        className.contains("adchoices", ignoreCase = true)
 }
 
 private fun collectViewMarkerTexts(view: View?): List<String> {
@@ -8054,17 +8055,20 @@ private fun collectViewMarkerTexts(view: View?): List<String> {
 
 private fun isPotentialFeedAdMarkerView(view: View?): Boolean {
     if (view == null) return false
-    return collectViewMarkerTexts(view).any(::isFeedAdMarkerText)
+    if (isFeedAdMarkerText(view.contentDescription)) return true
+    return view is TextView && isFeedAdMarkerText(view.text)
 }
 
 private fun isPotentialExplicitFeedAdMarkerView(view: View?): Boolean {
     if (view == null) return false
-    return collectViewMarkerTexts(view).any(::isExplicitFeedAdMarkerText)
+    if (isExplicitFeedAdMarkerText(view.contentDescription)) return true
+    return view is TextView && isExplicitFeedAdMarkerText(view.text)
 }
 
 private fun isPotentialFeedReelCtaAdMarkerView(view: View?): Boolean {
     if (view == null) return false
-    return collectViewMarkerTexts(view).any(::isFeedReelCtaAdMarkerText)
+    if (isFeedReelCtaAdMarkerText(view.contentDescription)) return true
+    return view is TextView && isFeedReelCtaAdMarkerText(view.text)
 }
 
 private fun isAnyAdMarkerText(value: CharSequence?): Boolean {
