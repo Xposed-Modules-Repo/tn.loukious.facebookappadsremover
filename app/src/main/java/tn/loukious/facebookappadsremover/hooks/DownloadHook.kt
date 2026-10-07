@@ -2192,9 +2192,18 @@ object DownloadHook {
         // Preselect the HD row (mod loop, libnc.so.c 1071982).
         renderSelection(selected.get())
 
+        // Cap the quality list so it actually scrolls
+        val maxListHeight = (activity.resources.displayMetrics.heightPixels * 0.5).toInt()
         val content = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            addView(ScrollView(activity).apply { addView(list) }, LinearLayout.LayoutParams(
+            addView(ScrollView(activity).apply {
+                addView(list)
+                viewTreeObserver.addOnGlobalLayoutListener {
+                    if (height > maxListHeight) {
+                        layoutParams = layoutParams.apply { height = maxListHeight }
+                    }
+                }
+            }, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
             addView(actions, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
