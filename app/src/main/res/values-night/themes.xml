@@ -1,7 +1,0 @@
-<resources>
-    <!-- Window theme only: the settings UI is Compose (ui/SettingsTheme.kt). -->
-    <style name="Theme.FBAR" parent="android:Theme.Material.NoActionBar">
-        <item name="android:statusBarColor">@android:color/transparent</item>
-        <item name="android:navigationBarColor">@android:color/transparent</item>
-    </style>
-</resources>

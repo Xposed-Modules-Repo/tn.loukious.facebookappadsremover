@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">Facebook App Ads Remover</string>
-    <string name="module_name">Facebook App Ads Remover</string>
-    <string name="module_description">Modern Xposed module for Facebook: ad-free feed, media download, account tools</string>
-</resources>
