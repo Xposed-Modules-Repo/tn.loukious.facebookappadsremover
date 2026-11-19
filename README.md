@@ -2,7 +2,7 @@
 
 An Xposed module that removes ads and unwanted content from the Facebook Android app, with media downloads, playback controls and account tools.
 
-Current version: **1.26**.
+Current version: **1.27** (`versionCode 28`).
 
 ## Requirements
 
@@ -10,7 +10,7 @@ Current version: **1.26**.
 - A compatible Xposed framework supporting the modern libxposed API **101 or newer**. Development testing uses Vector with API 102.
 - The main Facebook app, **`com.facebook.katana`**. Facebook Lite and Messenger are not supported.
 
-Development and device testing have covered Facebook **576.0.0.42.73**, **580.0.0.51.74** and **587.0.0.39.55**. Facebook 571 and earlier are unsupported. Facebook updates can change individual features; compatibility with arbitrary versions is not guaranteed.
+Development and device testing have covered Facebook **576.0.0.42.73**, **580.0.0.51.74**, **587.0.0.39.55** and **588.0.0.7.55**. Facebook 571 and earlier are unsupported. Facebook updates can change individual features; compatibility with arbitrary versions is not guaranteed.
 
 The new account-capture integration was checked on Facebook 587. Startup capture was observed on device; account switching, token refresh and logout have regression-test coverage but have not been verified on device. This integration has not been verified against older Facebook APKs.
 
@@ -28,9 +28,10 @@ Feature switches stay disabled until the settings app connects to the framework.
 - **Ads:** block sponsored News Feed posts, Story and Reels ads, Marketplace promotions and Instant Games ads. Extra feed protection also covers supported cached-feed paths. Supported rewarded games can still grant rewards after an ad is skipped.
 - **Feed filters:** hide Threads posts, Reels, suggestions, People You May Know, Stories blocks and detected Facebook-labeled AI content. Filter posts by keywords and optionally block automatic feed refreshes.
 - **Stories:** watch without marking stories as seen, or hide the Stories tray.
-- **Appearance:** force dark mode and use true-black AMOLED backgrounds. AMOLED mode requires Facebook's dark theme or Force dark mode.
+- **Appearance:** force dark mode, use true-black AMOLED backgrounds, and optionally replace Facebook's blue accents with your wallpaper's Material You colors on Android 12 or newer. AMOLED mode requires Facebook's dark theme or Force dark mode. **Turn off HDR** requests normal-brightness photo and video output where Android supports it; actual HDR suppression still needs verification on an HDR-capable phone.
 - **Privacy:** allow screenshots and recording, and block Facebook's capture detection.
 - **Navigation:** hide Reels, Marketplace or Gaming tabs while keeping their destinations accessible elsewhere.
+- **Menu:** hide Facebook side-menu entries individually or by section, hide Your shortcuts, and optionally show all entries without the See more button. Includes controls for Settings & privacy, Help & support and Other Meta products, with support for both list and tile-grid menus.
 - **Links:** use an external browser and optionally remove Facebook redirect tracking. Facebook pages and login flows stay in the app.
 - **Media:** download the active Reel or Story, choose media quality, use a browser or the built-in downloader, and optionally trigger downloads from copied links. Repost active Reels and Stories through the Facebook Page posting flow.
 - **Video:** resume playback position and optionally keep the current video playing in the background.
@@ -41,11 +42,11 @@ Ad blocking, external browsing, browser downloads and contextual download button
 
 Ad-family settings are independent, but methods shared by Stories and Reels may require both ad switches to be enabled. Feed-filter coverage depends on the hooks available in your Facebook version; hiding many suggestions can slow feed loading.
 
-## Settings and Apply changes
+## Settings and restarting Facebook
 
 The settings app has a home/status screen, separate feature pages, Diagnostics and About. It follows your system light/dark theme and uses wallpaper colors on Android 12 or newer.
 
-After changing a feature setting or successfully importing a session, return home and tap **Apply changes**. The module waits for participating Facebook processes to exit before reopening Facebook. Pending changes survive closing or recreating the settings app; edits made during a restart remain pending.
+After changing a feature setting or successfully importing a session, tap **Restart** in the bottom bar on Home or any feature page. The module waits for participating Facebook processes to exit before reopening Facebook. Pending changes survive closing or recreating the settings app; edits made during a restart remain pending.
 
 If a restart cannot be confirmed, changes remain pending. Open Facebook and retry, or force-stop Facebook manually before reopening it.
 
@@ -53,7 +54,7 @@ If a restart cannot be confirmed, changes remain pending. Open Facebook and retr
 
 **Export** saves Facebook's live authentication/login-session files to `Download/FacebookAppAdsRemover` as `FBAR-Session-*.json`. Separately captured tokens and cookies are not added to the export.
 
-**Import latest** restores the newest backup. **Import from file** lets you select a backup, including one copied from another device. After a successful import, return home and tap **Apply changes**.
+**Import latest** restores the newest backup. **Import from file** lets you select a backup, including one copied from another device. After a successful import, tap **Restart** in the bottom bar.
 
 Backups contain login credentials and can give access to your account. Keep them private and do not attach them to issue reports.
 
